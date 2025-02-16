@@ -2,3 +2,4 @@
 peer
 seed
 *.log
+.vscode/

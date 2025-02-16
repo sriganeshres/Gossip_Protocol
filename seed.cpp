@@ -78,16 +78,15 @@ private:
 
     buffer[bytesRead] = '\0';
     std::string message (buffer);
-
     if (message.substr (0, 4) == "REG:")
       {
 	handleRegistration (message, clientSocket, clientAddr);
       }
-    else if (message == "GET_PEERS")
+    if (message.find ("GET_PEERS") != std::string::npos)
       {
 	handlePeerListRequest (clientSocket);
       }
-    else if (message.substr (0, 10) == "Dead Node:")
+    if (message.substr (0, 10) == "Dead Node:")
       {
 	handleDeadNodeNotification (message);
       }
@@ -129,7 +128,6 @@ private:
 	  peerListStr += peer.ip + ":" + std::to_string (peer.port) + ";";
 	}
     }
-
     send (clientSocket, peerListStr.c_str (), peerListStr.length (), 0);
   }
 

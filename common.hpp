@@ -79,7 +79,7 @@ public:
 		       now.time_since_epoch ())
 		       .count ();
     return std::to_string (timestamp) + ":" + node.ip + ":"
-	   + std::to_string (msgNum);
+	   + std::to_string (node.port) + std::to_string (msgNum);
   }
 
   static std::string createDeadNodeMessage (const Node &deadNode,
@@ -90,7 +90,8 @@ public:
 		       now.time_since_epoch ())
 		       .count ();
     return "Dead Node:" + deadNode.ip + ":" + std::to_string (deadNode.port)
-	   + ":" + std::to_string (timestamp) + ":" + reporter.ip;
+	   + ":" + std::to_string (timestamp) + ":" + reporter.ip + ":"
+	   + std::to_string (reporter.port);
   }
 
   static std::string calculateHash (const std::string &message)

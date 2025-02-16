@@ -6,6 +6,7 @@ private:
   Node self;
   std::vector<Node> seedNodes;
   std::set<Node> connectedPeers;
+  std::set<Node> deadNodes;
   std::map<std::string, std::set<Node>>
     messageList; // Hash -> set of peers that have seen the message
   std::unique_ptr<Logger> logger;
@@ -79,6 +80,88 @@ private:
       }
   }
 
+  void serverThread ()
+  {
+    while (running)
+      {
+	struct sockaddr_in clientAddr;
+	socklen_t addrLen = sizeof (clientAddr);
+
+	int clientSocket
+	  = accept (serverSocket, (struct sockaddr *) &clientAddr, &addrLen);
+	if (clientSocket < 0)
+	  {
+	    if (running)
+	      {
+		logger->log ("Failed to accept connection");
+	      }
+	    continue;
+	  }
+
+	// Handle incoming message in a separate thread
+	std::thread ([this, clientSocket, clientAddr] () {
+	  char buffer[MAX_BUFFER_SIZE];
+	  ssize_t bytesRead
+	    = recv (clientSocket, buffer, MAX_BUFFER_SIZE - 1, 0);
+	  if (bytesRead > 0)
+	    {
+	      buffer[bytesRead] = '\0';
+	      std::string message (buffer);
+
+	      char ipStr[INET_ADDRSTRLEN];
+	      inet_ntop (AF_INET, &clientAddr.sin_addr, ipStr, INET_ADDRSTRLEN);
+
+	      Node sender{ipStr, ntohs (clientAddr.sin_port)};
+	      broadcastMessage (message, sender);
+	    }
+
+	  close (clientSocket);
+	}).detach ();
+      }
+  }
+
+  // Client thread to send messages to connected peers
+  void clientThread ()
+  {
+    while (running)
+      {
+	std::pair<std::string, Node> item;
+	messageQueue.wait_and_pop (item);
+
+	auto &[message, peer] = item;
+	int sockfd = -1;
+	bool isConnected = false;
+
+	{
+	  std::lock_guard<std::mutex> lock (peersMutex);
+	  auto it = peerSockets.find (peer);
+	  if (it != peerSockets.end ())
+	    {
+	      sockfd = it->second;
+	      isConnected = true;
+	    }
+	}
+
+	if (isConnected && sockfd != -1)
+	  {
+	    ssize_t bytesSent = send (sockfd, message.c_str (),
+				      message.length (), MSG_NOSIGNAL);
+	    if (bytesSent < 0)
+	      {
+		if (errno == EPIPE)
+		  {
+		    handleDeadPeer (peer);
+		  }
+		else
+		  {
+		    logger->log ("Failed to send message to peer: " + peer.ip
+				 + ":" + std::to_string (peer.port));
+		  }
+	      }
+	  }
+      }
+  }
+
   void connectToSeeds ()
   {
     // Calculate minimum required seed connections
@@ -132,17 +215,27 @@ private:
     // Register with seed
     std::string regMsg = Message::createRegistrationMessage (self);
     send (sockfd, regMsg.c_str (), regMsg.length (), 0);
-
     // Get peer list
     std::string getPeersMsg = "GET_PEERS";
     send (sockfd, getPeersMsg.c_str (), getPeersMsg.length (), 0);
-
     char buffer[MAX_BUFFER_SIZE];
     ssize_t bytesRead = recv (sockfd, buffer, MAX_BUFFER_SIZE - 1, 0);
     if (bytesRead > 0)
       {
 	buffer[bytesRead] = '\0';
-	processPeerList (std::string (buffer));
+	std::string receivedData (buffer);
+
+	// Remove "Registration successful" if it exists
+	std::string keyword = "Registration successful";
+	size_t pos = receivedData.find (keyword);
+	if (pos != std::string::npos)
+	  {
+	    receivedData = receivedData.substr (
+	      pos + keyword.length ()); // Extract remaining part
+	  }
+
+	std::cout << "Processed peer list: " << receivedData << "\n";
+	processPeerList (receivedData);
       }
 
     close (sockfd);
@@ -158,8 +251,10 @@ private:
     while (std::getline (iss, peerInfo, ';'))
       {
 	if (peerInfo.empty ())
-	  continue;
-
+	  {
+	    std::cout << "peerInfo is empty\n";
+	    continue;
+	  }
 	std::istringstream peerStream (peerInfo);
 	std::string ip;
 	int port;
@@ -167,12 +262,15 @@ private:
 	std::getline (peerStream, ip, ':');
 	peerStream >> port;
 
-	if (ip != self.ip || port != self.port)
+	if (ip != self.ip
+	    || port != self.port
+		 && std::find (connectedPeers.begin (), connectedPeers.end (),
+			       Node{ip, port})
+		      == connectedPeers.end ())
 	  {
 	    availablePeers.push_back ({ip, port});
 	  }
       }
-
     // Use power-law distribution to determine number of connections
     if (!availablePeers.empty ())
       {
@@ -184,16 +282,96 @@ private:
 
 	for (int i = 0; i < degree && i < availablePeers.size (); ++i)
 	  {
-	    connectToPeer (availablePeers[i]);
+	    if (std::find (connectedPeers.begin (), connectedPeers.end (),
+			   availablePeers[i])
+		  == connectedPeers.end ()
+		&& std::find (deadNodes.begin (), deadNodes.end (),
+			      availablePeers[i])
+		     == deadNodes.end ())
+	      {
+		connectToPeer (availablePeers[i]);
+	      }
 	  }
       }
   }
 
+  void requestPeerListPeriodically ()
+  {
+    while (running)
+      {
+	std::this_thread::sleep_for (
+	  std::chrono::seconds (30)); // Request every 30 seconds
+
+	for (const auto &seed : seedNodes)
+	  {
+	    int sockfd = socket (AF_INET, SOCK_STREAM, 0);
+	    if (sockfd < 0)
+	      continue;
+
+	    struct sockaddr_in seedAddr;
+	    seedAddr.sin_family = AF_INET;
+	    seedAddr.sin_port = htons (seed.port);
+
+	    if (inet_pton (AF_INET, seed.ip.c_str (), &seedAddr.sin_addr) <= 0)
+	      {
+		close (sockfd);
+		continue;
+	      }
+
+	    if (connect (sockfd, (struct sockaddr *) &seedAddr,
+			 sizeof (seedAddr))
+		< 0)
+	      {
+		close (sockfd);
+		continue;
+	      }
+
+	    std::string getPeersMsg = "GET_PEERS";
+	    send (sockfd, getPeersMsg.c_str (), getPeersMsg.length (), 0);
+
+	    char buffer[MAX_BUFFER_SIZE];
+	    ssize_t bytesRead = recv (sockfd, buffer, MAX_BUFFER_SIZE - 1, 0);
+	    if (bytesRead > 0)
+	      {
+		buffer[bytesRead] = '\0';
+		std::string receivedData (buffer);
+		processPeerList (receivedData);
+	      }
+
+	    close (sockfd);
+	  }
+      }
+  }
+  // In PeerNode class, modify these methods:
+
   void connectToPeer (const Node &peer)
   {
+    // Check if already connected
+    {
+      std::lock_guard<std::mutex> lock (peersMutex);
+      if (connectedPeers.find (peer) != connectedPeers.end ())
+	{
+	  return; // Already connected
+	}
+    }
+
     int sockfd = socket (AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
-      return;
+      {
+	logger->log ("Failed to create socket for connecting to peer: "
+		     + peer.ip + ":" + std::to_string (peer.port));
+	return;
+      }
+
+    // Set socket options for keep-alive
+    int keepalive = 1;
+    if (setsockopt (sockfd, SOL_SOCKET, SO_KEEPALIVE, &keepalive,
+		    sizeof (keepalive))
+	< 0)
+      {
+	close (sockfd);
+	return;
+      }
 
     struct sockaddr_in peerAddr;
     peerAddr.sin_family = AF_INET;
@@ -213,13 +391,76 @@ private:
 
     {
       std::lock_guard<std::mutex> lock (peersMutex);
-      connectedPeers.insert (peer);
-      peerSockets[peer] = sockfd;
-      missedPings[peer] = 0;
+      if (connectedPeers.find (peer) == connectedPeers.end ())
+	{
+	  connectedPeers.insert (peer);
+	  peerSockets[peer] = sockfd;
+	  missedPings[peer] = 0;
+	  logger->log ("Connected to peer: " + peer.ip + ":"
+		       + std::to_string (peer.port));
+	}
+      else
+	{
+	  // Another thread already connected
+	  close (sockfd);
+	  return;
+	}
+    }
+  }
+
+  void broadcastMessage (const std::string &message, const Node &sender)
+  {
+    std::string messageHash = Message::calculateHash (message);
+    bool shouldBroadcast = false;
+
+    {
+      std::lock_guard<std::mutex> lock (messageMutex);
+      if (messageList.find (messageHash) == messageList.end ())
+	{
+	  // Mark the message as seen by this peer
+	  messageList[messageHash] = {self};
+	  shouldBroadcast = true;
+	}
+      else
+	{
+	  // Check if the sender has already seen this message
+	  if (messageList[messageHash].find (sender)
+	      == messageList[messageHash].end ())
+	    {
+	      // Mark the sender as having seen this message
+	      messageList[messageHash].insert (sender);
+	      logger->log ("Received new message: " + message);
+	    }
+	  else
+	    {
+	      // The sender has already seen this message, so we don't need to
+	      // broadcast it again
+	      return;
+	    }
+	}
     }
 
-    logger->log ("Connected to peer: " + peer.ip + ":"
-		 + std::to_string (peer.port));
+    if (shouldBroadcast)
+      {
+	std::vector<Node> peersToSend;
+	{
+	  std::lock_guard<std::mutex> lock (peersMutex);
+	  for (const auto &peer : connectedPeers)
+	    {
+	      if (peer.ip != sender.ip || peer.port != sender.port)
+		{
+		  peersToSend.push_back (peer);
+		}
+	    }
+	}
+
+	for (const auto &peer : peersToSend)
+	  {
+	    std::string messageWithSender = message + " (from " + self.ip + ":"
+					    + std::to_string (self.port) + ")";
+	    messageQueue.push ({messageWithSender, peer});
+	  }
+      }
   }
 
   void generateGossipMessage ()
@@ -229,62 +470,19 @@ private:
 	std::this_thread::sleep_for (
 	  std::chrono::seconds (MESSAGE_GENERATION_INTERVAL));
 
-	std::string message
-	  = Message::createGossipMessage (self, messageCount++);
-	broadcastMessage (message, Node{"", -1});
-
-	logger->log ("Generated gossip message: " + message);
-      }
-  }
-
-  void broadcastMessage (const std::string &message, const Node &sender)
-  {
-    std::string messageHash = Message::calculateHash (message);
-
-    {
-      std::lock_guard<std::mutex> lock (messageMutex);
-      if (messageList.find (messageHash) != messageList.end ())
-	{
-	  return; // Already seen this message
-	}
-      messageList[messageHash] = {sender};
-    }
-
-    logger->log ("Received new message: " + message);
-
-    std::lock_guard<std::mutex> lock (peersMutex);
-    for (const auto &peer : connectedPeers)
-      {
-	if (peer == sender)
-	  continue;
-
-	messageQueue.push ({message, peer});
-      }
-  }
-
-  void messageSender ()
-  {
-    while (running)
-      {
-	std::pair<std::string, Node> item;
-	messageQueue.wait_and_pop (item);
-
-	auto &[message, peer] = item;
-	int sockfd = -1;
-
+	// Check if we have any connected peers before generating message
 	{
 	  std::lock_guard<std::mutex> lock (peersMutex);
-	  auto it = peerSockets.find (peer);
-	  if (it != peerSockets.end ())
+	  if (connectedPeers.empty ())
 	    {
-	      sockfd = it->second;
+	      continue;
 	    }
 	}
 
-	if (sockfd != -1)
-	  {
-	    send (sockfd, message.c_str (), message.length (), 0);
-	  }
+	std::string message
+	  = Message::createGossipMessage (self, messageCount++);
+	broadcastMessage (message, Node{"", -1});
+	logger->log ("Generated gossip message: " + message);
       }
   }
 
@@ -334,6 +532,7 @@ private:
   {
     logger->log ("Peer appears to be dead: " + peer.ip + ":"
 		 + std::to_string (peer.port));
+    deadNodes.insert (peer);
 
     // Notify seeds
     for (const auto &seed : seedNodes)
@@ -403,10 +602,11 @@ public:
       }
 
     // Start worker threads
+    workerThreads.emplace_back (&PeerNode::serverThread, this); // Server thread
+    workerThreads.emplace_back (&PeerNode::clientThread, this);
     workerThreads.emplace_back (&PeerNode::generateGossipMessage, this);
     workerThreads.emplace_back (&PeerNode::checkPeerLiveness, this);
-    workerThreads.emplace_back (&PeerNode::messageSender, this);
-
+    workerThreads.emplace_back (&PeerNode::requestPeerListPeriodically, this);
     // Handle shutdown signal
     signal (SIGINT, [] (int) {
       // Cleanup will be handled by destructor
@@ -443,6 +643,8 @@ public:
 	close (clientSocket);
       }
   }
+
+  std::set<Node> getConnectedPeers () const { return connectedPeers; }
 
   ~PeerNode ()
   {
