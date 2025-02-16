@@ -1,259 +1,236 @@
-#include "common.hpp"
+/**
+ * seed.cpp
+ *
+ * This program implements a Seed Node for the Gossip Protocol-based P2P network.
+ * The seed node listens for incoming connections from peers.
+ * When a peer sends a "Register" message, the seed registers that peer (if not already registered)
+ * and sends back its current list of peers (each as IP:Port:degree; separated by semicolons).
+ * It also handles "UpdateDegree" and "DeadNode" messages.
+ *
+ * Compile with:
+ *    g++ -std=c++11 -pthread seed.cpp -o seed
+ */
 
-class SeedNode
-{
-private:
-  Node self;
-  std::set<Node> peerList;
-  std::mutex peerListMutex;
-  std::unique_ptr<Logger> logger;
-  int serverSocket;
-  bool running;
-  std::vector<std::thread> workerThreads;
-  ThreadSafeQueue<std::pair<int, sockaddr_in>> clientQueue;
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
-  void initializeSocket ()
-  {
-    serverSocket = socket (AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == -1)
-      {
-	throw NetworkError ("Failed to create socket");
-      }
+#include <chrono>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+#include <algorithm>
 
-    int opt = 1;
-    if (setsockopt (serverSocket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt,
-		    sizeof (opt)))
-      {
-	throw NetworkError ("Failed to set socket options");
-      }
-
-    struct sockaddr_in address;
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons (self.port);
-
-    if (bind (serverSocket, (struct sockaddr *) &address, sizeof (address)) < 0)
-      {
-	throw NetworkError ("Failed to bind socket");
-      }
-
-    if (listen (serverSocket, SOMAXCONN) < 0)
-      {
-	throw NetworkError ("Failed to listen on socket");
-      }
-  }
-
-  void acceptConnections ()
-  {
-    while (running)
-      {
-	struct sockaddr_in clientAddr;
-	socklen_t addrLen = sizeof (clientAddr);
-
-	int clientSocket
-	  = accept (serverSocket, (struct sockaddr *) &clientAddr, &addrLen);
-	if (clientSocket < 0)
-	  {
-	    if (running)
-	      {
-		logger->log ("Failed to accept connection");
-	      }
-	    continue;
-	  }
-
-	clientQueue.push ({clientSocket, clientAddr});
-      }
-  }
-
-  void handleClient (int clientSocket, sockaddr_in clientAddr)
-  {
-    char buffer[MAX_BUFFER_SIZE];
-    ssize_t bytesRead = recv (clientSocket, buffer, MAX_BUFFER_SIZE - 1, 0);
-
-    if (bytesRead <= 0)
-      {
-	close (clientSocket);
-	return;
-      }
-
-    buffer[bytesRead] = '\0';
-    std::string message (buffer);
-
-    if (message.substr (0, 4) == "REG:")
-      {
-	handleRegistration (message, clientSocket, clientAddr);
-      }
-    else if (message == "GET_PEERS")
-      {
-	handlePeerListRequest (clientSocket);
-      }
-    else if (message.substr (0, 10) == "Dead Node:")
-      {
-	handleDeadNodeNotification (message);
-      }
-
-    close (clientSocket);
-  }
-
-  void handleRegistration (const std::string &message, int clientSocket,
-			   const sockaddr_in &clientAddr)
-  {
-    std::istringstream iss (message.substr (4));
+// Data structure representing a registered peer.
+struct PeerRecord {
     std::string ip;
     int port;
+    int degree;
 
-    std::getline (iss, ip, ':');
-    iss >> port;
-
-    Node newPeer{ip, port};
-
-    {
-      std::lock_guard<std::mutex> lock (peerListMutex);
-      peerList.insert (newPeer);
-    }
-
-    logger->log ("New peer registered: " + ip + ":" + std::to_string (port));
-
-    // Send acknowledgment
-    std::string ack = "Registration successful";
-    send (clientSocket, ack.c_str (), ack.length (), 0);
-  }
-
-  void handlePeerListRequest (int clientSocket)
-  {
-    std::string peerListStr;
-    {
-      std::lock_guard<std::mutex> lock (peerListMutex);
-      for (const auto &peer : peerList)
-	{
-	  peerListStr += peer.ip + ":" + std::to_string (peer.port) + ";";
-	}
-    }
-
-    send (clientSocket, peerListStr.c_str (), peerListStr.length (), 0);
-  }
-
-  void handleDeadNodeNotification (const std::string &message)
-  {
-    std::istringstream iss (message.substr (10));
-    std::string deadIp;
-    int deadPort;
-
-    std::getline (iss, deadIp, ':');
-    iss >> deadPort;
-
-    Node deadNode{deadIp, deadPort};
-
-    {
-      std::lock_guard<std::mutex> lock (peerListMutex);
-      peerList.erase (deadNode);
-    }
-
-    logger->log ("Removed dead node: " + deadIp + ":"
-		 + std::to_string (deadPort));
-  }
-
-  void clientHandler ()
-  {
-    while (running)
-      {
-	std::pair<int, sockaddr_in> client;
-	clientQueue.wait_and_pop (client);
-
-	try
-	  {
-	    handleClient (client.first, client.second);
-	  }
-	catch (const std::exception &e)
-	  {
-	    logger->log ("Error handling client: " + std::string (e.what ()));
-	  }
-      }
-  }
-
-public:
-  SeedNode (const std::string &ip, int port)
-    : self{ip, port}, running (true),
-      logger (std::make_unique<Logger> ("seed_" + ip + "_"
-					+ std::to_string (port) + ".log"))
-  {
-    try
-      {
-	initializeSocket ();
-      }
-    catch (const NetworkError &e)
-      {
-	logger->log ("Failed to initialize seed node: "
-		     + std::string (e.what ()));
-	throw;
-      }
-  }
-
-  void start ()
-  {
-    logger->log ("Starting seed node on " + self.ip + ":"
-		 + std::to_string (self.port));
-
-    // Start worker threads
-    for (int i = 0; i < std::thread::hardware_concurrency (); ++i)
-      {
-	workerThreads.emplace_back (&SeedNode::clientHandler, this);
-      }
-
-    // Start accept thread
-    std::thread acceptThread (&SeedNode::acceptConnections, this);
-
-    // Wait for shutdown signal
-    signal (SIGINT, [] (int) {
-      // Cleanup will be handled by destructor
-      exit (0);
-    });
-
-    acceptThread.join ();
-  }
-
-  ~SeedNode ()
-  {
-    running = false;
-
-    // Close server socket to stop accept
-    if (serverSocket != -1)
-      {
-	close (serverSocket);
-      }
-
-    // Wait for all worker threads
-    for (auto &thread : workerThreads)
-      {
-	if (thread.joinable ())
-	  {
-	    thread.join ();
-	  }
-      }
-
-    logger->log ("Seed node shut down");
-  }
+    PeerRecord(const std::string &ipAddr, int portNum, int deg = 0)
+        : ip(ipAddr), port(portNum), degree(deg) {}
 };
 
-int
-main (int argc, char *argv[])
-{
-  if (argc != 3)
-    {
-      std::cerr << "Usage: " << argv[0] << " <ip> <port>\n";
-      return 1;
+class SeedNode {
+public:
+    SeedNode(const std::string &ip, int port)
+        : seedIP(ip), seedPort(port), serverSock(-1) {}
+
+    // Start the seed server: bind, listen, and spawn threads for each incoming connection.
+    void start() {
+        // Create server socket.
+        serverSock = socket(AF_INET, SOCK_STREAM, 0);
+        if (serverSock < 0) {
+            perror("Seed: Socket creation failed");
+            exit(EXIT_FAILURE);
+        }
+        int opt = 1;
+        if (setsockopt(serverSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+            perror("Seed: setsockopt failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // Bind the socket.
+        sockaddr_in serverAddr;
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_addr.s_addr = inet_addr(seedIP.c_str());
+        serverAddr.sin_port = htons(seedPort);
+        if (bind(serverSock, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+            perror("Seed: Bind failed");
+            exit(EXIT_FAILURE);
+        }
+
+        // Listen for incoming connections.
+        if (listen(serverSock, 10) < 0) {
+            perror("Seed: Listen failed");
+            exit(EXIT_FAILURE);
+        }
+        log("Seed node listening on " + seedIP + ":" + std::to_string(seedPort));
+
+        // Main accept loop.
+        while (true) {
+            sockaddr_in clientAddr;
+            socklen_t addrLen = sizeof(clientAddr);
+            int clientSock = accept(serverSock, (struct sockaddr *)&clientAddr, &addrLen);
+            if (clientSock < 0) {
+                perror("Seed: Accept failed");
+                continue;
+            }
+            std::thread(&SeedNode::handleConnection, this, clientSock).detach();
+        }
+        close(serverSock);
     }
 
-  try
-    {
-      SeedNode seed (argv[1], std::stoi (argv[2]));
-      seed.start ();
-    }
-  catch (const std::exception &e)
-    {
-      std::cerr << "Fatal error: " << e.what () << std::endl;
-      return 1;
+private:
+    std::string seedIP;
+    int seedPort;
+    int serverSock;
+    std::vector<PeerRecord> peerList;
+    std::mutex peerMutex;
+
+    // Utility: Get current timestamp string.
+    std::string currentTimestamp() {
+        std::time_t now = std::time(nullptr);
+        std::tm *ltm = std::localtime(&now);
+        std::ostringstream oss;
+        oss << std::put_time(ltm, "%d-%m-%Y %H-%M-%S");
+        return oss.str();
     }
 
-  return 0;
+    // Utility: Log message to console and append to a file.
+    void log(const std::string &message) {
+        std::string timeStr = currentTimestamp();
+        std::string logMsg = "[" + timeStr + "] " + message;
+        std::cout << logMsg << std::endl;
+        std::ofstream outfile("seed-" + std::to_string(seedPort) + ".log", std::ios::app);
+        if (outfile) {
+            outfile << logMsg << std::endl;
+        }
+    }
+
+    // Utility: Format the current peer list into a single string.
+    std::string formatPeerList() {
+        std::lock_guard<std::mutex> lock(peerMutex);
+        std::ostringstream oss;
+        for (const auto &peer : peerList) {
+            oss << peer.ip << ":" << peer.port << ":" << peer.degree << ";";
+        }
+        return oss.str();
+    }
+
+    // Main handler for an incoming connection.
+    void handleConnection(int clientSock) {
+        char buffer[1024];
+        std::string dataBuffer;
+        while (true) {
+            ssize_t bytesRead = read(clientSock, buffer, sizeof(buffer) - 1);
+            if (bytesRead <= 0) break;
+            buffer[bytesRead] = '\0';
+            dataBuffer.append(buffer);
+            // Process complete messages (terminated by '\n').
+            size_t pos;
+            while ((pos = dataBuffer.find('\n')) != std::string::npos) {
+                std::string msg = dataBuffer.substr(0, pos);
+                dataBuffer.erase(0, pos + 1);
+                processMessage(msg, clientSock);
+            }
+        }
+        close(clientSock);
+    }
+
+    // Process a single message from a peer.
+    void processMessage(const std::string &msg, int clientSock) {
+        std::istringstream iss(msg);
+        std::string command;
+        std::getline(iss, command, ':');
+
+        if (command == "Register") {
+            // Expected format: Register:<peerIP>:<peerPort>:<degree>
+            std::string peerIP, peerPortStr, degreeStr;
+            std::getline(iss, peerIP, ':');
+            std::getline(iss, peerPortStr, ':');
+            std::getline(iss, degreeStr, ':');
+            int peerPort = std::stoi(peerPortStr);
+            int degree = degreeStr.empty() ? 0 : std::stoi(degreeStr);
+
+            {
+                std::lock_guard<std::mutex> lock(peerMutex);
+                bool exists = false;
+                for (auto &rec : peerList) {
+                    if (rec.ip == peerIP && rec.port == peerPort) {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    peerList.emplace_back(peerIP, peerPort, degree);
+                    log("Registered new peer: " + peerIP + ":" + peerPortStr +
+                        " (degree: " + std::to_string(degree) + ")");
+                }
+            }
+            // Immediately respond with the current peer list.
+            std::string response = formatPeerList();
+            send(clientSock, response.c_str(), response.size(), 0);
+
+        } else if (command == "UpdateDegree") {
+            // Expected format: UpdateDegree:<peerIP>:<peerPort>
+            std::string peerIP, peerPortStr;
+            std::getline(iss, peerIP, ':');
+            std::getline(iss, peerPortStr, ':');
+            int peerPort = std::stoi(peerPortStr);
+            {
+                std::lock_guard<std::mutex> lock(peerMutex);
+                for (auto &rec : peerList) {
+                    if (rec.ip == peerIP && rec.port == peerPort) {
+                        rec.degree++;
+                        log("Updated degree for peer: " + peerIP + ":" + peerPortStr +
+                            " to " + std::to_string(rec.degree));
+                        break;
+                    }
+                }
+            }
+        } else if (command == "DeadNode") {
+            // Expected format: DeadNode:<deadIP>:<deadPort>:<timestamp>:<reporterIP>:<reporterPort>
+            std::string deadIP, deadPortStr, timestamp, reporterIP, reporterPortStr;
+            std::getline(iss, deadIP, ':');
+            std::getline(iss, deadPortStr, ':');
+            std::getline(iss, timestamp, ':');
+            std::getline(iss, reporterIP, ':');
+            std::getline(iss, reporterPortStr, ':');
+            int deadPort = std::stoi(deadPortStr);
+            {
+                std::lock_guard<std::mutex> lock(peerMutex);
+                auto it = std::remove_if(peerList.begin(), peerList.end(),
+                                         [deadIP, deadPort](const PeerRecord &rec) {
+                                             return (rec.ip == deadIP && rec.port == deadPort);
+                                         });
+                if (it != peerList.end()) {
+                    peerList.erase(it, peerList.end());
+                    log("Removed dead peer: " + deadIP + ":" + deadPortStr +
+                        " reported at " + timestamp);
+                }
+            }
+        } else {
+            log("Unknown command received: " + msg);
+        }
+    }
+};
+
+int main(int argc, char *argv[]) {
+    if (argc != 3) {
+        std::cerr << "Usage: ./seed <SeedIP> <SeedPort>" << std::endl;
+        return EXIT_FAILURE;
+    }
+    std::string ip = argv[1];
+    int port = std::stoi(argv[2]);
+    SeedNode seed(ip, port);
+    seed.start();
+    return EXIT_SUCCESS;
 }
