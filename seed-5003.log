@@ -1,0 +1,7 @@
+[17-02-2025 23-39-29] Seed node listening on 127.0.0.1:5003
+[17-02-2025 23-39-30] Registered new peer: 127.0.0.1:9001 (degree: 0)
+[17-02-2025 23-39-31] Registered new peer: 127.0.0.2:9002 (degree: 0)
+[17-02-2025 23-39-32] Registered new peer: 127.0.0.3:9003 (degree: 0)
+[17-02-2025 23-39-33] Registered new peer: 127.0.0.4:9004 (degree: 0)
+[17-02-2025 23-39-34] Registered new peer: 127.0.0.5:9005 (degree: 0)
+[17-02-2025 23-41-29] Removed dead peer: 127.0.0.2:9002 reported at 17-02-2025 23-41-29
