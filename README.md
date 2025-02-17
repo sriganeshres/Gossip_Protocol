@@ -1,178 +1,91 @@
-# Project Overview
+# P2P Gossip Protocol Implementation
 
-This project implements a peer-to-peer network with seed nodes and peer nodes. The seed nodes help peers discover each other, while the peer nodes communicate and share messages using a gossip protocol.
+This project implements a peer-to-peer (P2P) gossip protocol over a network using two types of nodes:
 
-## Project Structure
+1. **Seed Nodes:**  
+   Seed nodes are used as bootstrap nodes. They maintain a Peer List (PL) with the IP address, port, and fixed degree (i.e. the number of persistent connections) of each registered peer. When a new peer registers, a seed node adds the peer (if not already registered) and immediately returns its current Peer List. Seed nodes do not update a peer’s degree after the initial registration. They also remove a peer from the PL when they receive a dead–node notification.
 
-### Files
+2. **Peer Nodes:**  
+   Peer nodes first read a configuration file (e.g., `seed.config`) that contains the list of seed nodes (one per line, in the format `IP:Port`). A peer:
+   - **Registration:** Randomly selects at least ⌊(n/2)⌋+1 seed nodes (where *n* is the total number of seeds) and registers with them using a registration message (`Register:<self.IP>:<self.Port>:0`). It then receives the current peer lists from the seeds and forms a union.
+   - **Peer Selection:** Using a weighted (power–law) random selection (weight = degree + 2), the peer chooses a subset of discovered peers to establish persistent TCP connections. The degree is set only at the time of the first registration.
+   - **Gossip Messaging:** Every 5 seconds, a peer generates a gossip message in the format `<timestamp>:<self.IP>:<MsgID>` (for a total of 10 messages). Each peer maintains a Message List (ML) so that each message is forwarded only once. New messages are logged and forwarded to all persistent connections (except the sender).
+   - **Liveliness Checking:** Every 13 seconds, the peer pings each connected peer using a temporary connection (via a Ping/Pong handshake) that does not affect the persistent connection’s degree count. If a peer fails to respond to 3 consecutive pings, a dead–node message (`Dead Node:<deadIP>:<deadPort>:<timestamp>:<self.IP>`) is sent to all seeds, and the persistent connection to that peer is closed.
 
-- [`.clang-format`](.clang-format ): Configuration file for the `clang-format` tool.
-- [`.gitignore`](.gitignore ): Specifies files and directories to be ignored by Git.
-- [`common.hpp`](common.hpp ): Contains common definitions and utilities used by both seed and peer nodes.
-- [`conf.clang`](conf.clang ): Configuration file for Clang.
-- [`config.txt`](config.txt ): Configuration file listing seed nodes.
-- [`peer`](peer ): Executable for the peer node.
-- [`peer.cpp`](peer.cpp ): Source code for the peer node.
-- [`seed`](seed ): Executable for the seed node.
-- [`seed.cpp`](seed.cpp ): Source code for the seed node.
+## Files
+
+- **seed.cpp:** Contains the code for the Seed Node.  
+  The seed node listens for incoming connections, processes registration and dead–node messages, and logs its Peer List (with degrees) to both console and a file (`seed_metrics.txt`) every 5 seconds.
+
+- **peer.cpp:** Contains the code for the Peer Node.  
+  The peer node registers with seed nodes, discovers other peers, establishes persistent TCP connections (using weighted, power–law selection), generates and broadcasts gossip messages, and performs periodic liveliness checks.
+
+## Compilation
+
+Make sure you have a C++11 (or later) compliant compiler. For example, using `g++`:
+
+```bash
+g++ -std=c++11 -pthread seed.cpp -o s
+g++ -std=c++11 -pthread peer.cpp -o p
+```
+
+This will create two executables:
+- `s` for seed nodes.
+- `p` for peer nodes.
+
+## Running the Nodes
+
+You can run the nodes in separate terminal tabs or windows.
+
+### Starting Seed Nodes
+
+For example, to start four seed nodes on the following IP/ports:
+
+```bash
+./s 127.0.0.1 5000
+./s 127.0.0.1 5001
+./s 127.0.0.1 5002
+./s 127.0.0.1 5003
+```
+
+Each seed node will:
+- Listen on its assigned port.
+- Accept peer registration requests.
+- Maintain and log the current Peer List and degree metrics (written to `seed_metrics.txt`).
+
+### Running Peer Nodes
+
+Create a configuration file (e.g., `seed.config`) with the seed node details, one per line:
 
 ```
-.
-├── common.hpp
-├── conf.clang
-├── config.txt
-├── peer.cpp
-├── README.md
-└── seed.cpp
+127.0.0.1:5000
+127.0.0.1:5001
+127.0.0.1:5002
+127.0.0.1:5003
 ```
 
-## Detailed Explanation
+Then, start multiple peer nodes on different IPs/ports. For example:
 
-### [`common.hpp`](common.hpp )
-
-This file contains common definitions and utilities used by both seed and peer nodes.
-
-#### Constants
-
-- [`MAX_BUFFER_SIZE`](common.hpp ): Maximum buffer size for network communication.
-- [`PING_INTERVAL`](common.hpp ): Interval for pinging peers to check their liveness.
-- [`MAX_MISSED_PINGS`](common.hpp ): Maximum number of missed pings before considering a peer dead.
-- [`MESSAGE_GENERATION_INTERVAL`](common.hpp ): Interval for generating gossip messages.
-- [`MAX_MESSAGES`](common.hpp ): Maximum number of messages to generate.
-
-#### Structs
-
-- [`Node`](common.hpp ): Represents a node in the network with [`ip`](common.hpp ) and [`port`](common.hpp ). Implements comparison operators for use in sets.
-
-#### Enums
-
-- [`MessageType`](common.hpp ): Enum for different message types used in protocol communication.
-
-#### Classes
-
-- [`Message`](common.hpp ): Handles message creation and parsing.
-- [`ThreadSafeQueue`](common.hpp ): A thread-safe queue for message processing.
-- [`PowerLawDegreeGenerator`](common.hpp ): Generates degrees based on a power-law distribution.
-- [`NetworkError`](common.hpp ): Custom exception class for network errors.
-- [`Logger`](common.hpp ): Handles logging with thread safety.
-
-### [`seed.cpp`](seed.cpp )
-
-This file contains the implementation of the seed node.
-
-#### [`SeedNode`](seed.cpp ) Class
-
-- **Private Members**:
-  - [`self`](seed.cpp ): Represents the seed node itself.
-  - [`peerList`](seed.cpp ): List of registered peers.
-  - [`peerListMutex`](seed.cpp ): Mutex for thread-safe access to [`peerList`](seed.cpp ).
-  - [`logger`](peer.cpp ): Logger instance.
-  - [`serverSocket`](peer.cpp ): Socket for accepting connections.
-  - [`running`](peer.cpp ): Flag to indicate if the node is running.
-  - [`workerThreads`](peer.cpp ): Vector of worker threads.
-  - [`clientQueue`](seed.cpp ): Queue for handling client connections.
-
-- **Private Methods**:
-  - [`initializeSocket()`](peer.cpp ): Initializes the server socket.
-  - [`acceptConnections()`](seed.cpp ): Accepts incoming connections.
-  - [`handleClient()`](seed.cpp ): Handles client requests.
-  - [`handleRegistration()`](seed.cpp ): Handles peer registration.
-  - [`handlePeerListRequest()`](seed.cpp ): Handles requests for the peer list.
-  - [`handleDeadNodeNotification()`](seed.cpp ): Handles notifications of dead nodes.
-  - [`clientHandler()`](seed.cpp ): Processes client connections from the queue.
-
-- **Public Methods**:
-  - [`SeedNode()`](seed.cpp ): Constructor to initialize the seed node.
-  - `start()`: Starts the seed node.
-  - `~SeedNode()`: Destructor to clean up resources.
-
-#### [`main`](peer.cpp ) Function
-
-- Parses command-line arguments to get IP and port.
-- Creates and starts a [`SeedNode`](seed.cpp ) instance.
-
-### [`peer.cpp`](peer.cpp )
-
-This file contains the implementation of the peer node.
-
-#### [`PeerNode`](peer.cpp ) Class
-
-- **Private Members**:
-  - [`self`](peer.cpp ): Represents the peer node itself.
-  - [`seedNodes`](peer.cpp ): List of seed nodes.
-  - [`connectedPeers`](peer.cpp ): Set of connected peers.
-  - [`messageList`](peer.cpp ): Map of messages and the peers that have seen them.
-  - [`logger`](peer.cpp ): Logger instance.
-  - [`peersMutex`](peer.cpp ): Mutex for thread-safe access to [`connectedPeers`](peer.cpp ).
-  - [`messageMutex`](peer.cpp ): Mutex for thread-safe access to [`messageList`](peer.cpp ).
-  - [`degreeGen`](peer.cpp ): Power-law degree generator.
-  - [`messageQueue`](peer.cpp ): Queue for handling messages.
-  - [`serverSocket`](peer.cpp ): Socket for accepting connections.
-  - [`running`](peer.cpp ): Flag to indicate if the node is running.
-  - [`messageCount`](peer.cpp ): Counter for generated messages.
-  - [`workerThreads`](peer.cpp ): Vector of worker threads.
-  - [`missedPings`](peer.cpp ): Map of peers and their missed pings.
-  - [`peerSockets`](peer.cpp ): Map of peers and their sockets.
-
-- **Private Methods**:
-  - [`loadConfig()`](peer.cpp ): Loads seed nodes from the configuration file.
-  - [`initializeSocket()`](peer.cpp ): Initializes the server socket.
-  - [`connectToSeeds()`](peer.cpp ): Connects to seed nodes.
-  - [`connectToSeed()`](peer.cpp ): Connects to a specific seed node.
-  - [`processPeerList()`](peer.cpp ): Processes the peer list received from a seed node.
-  - [`connectToPeer()`](peer.cpp ): Connects to a specific peer node.
-  - [`generateGossipMessage()`](peer.cpp ): Generates gossip messages.
-  - [`broadcastMessage()`](peer.cpp ): Broadcasts a message to connected peers.
-  - [`messageSender()`](peer.cpp ): Sends messages from the queue to peers.
-  - [`checkPeerLiveness()`](peer.cpp ): Checks the liveness of connected peers.
-  - [`pingPeer()`](peer.cpp ): Pings a peer to check its liveness.
-  - [`handleDeadPeer()`](peer.cpp ): Handles a dead peer.
-
-- **Public Methods**:
-  - [`PeerNode()`](peer.cpp ): Constructor to initialize the peer node.
-  - `start()`: Starts the peer node.
-  - `~PeerNode()`: Destructor to clean up resources.
-
-#### [`main`](peer.cpp ) Function
-
-- Parses command-line arguments to get IP, port, and configuration file.
-- Creates and starts a [`PeerNode`](peer.cpp ) instance.
-
-### [`config.txt`](config.txt )
-
-This file lists the seed nodes in the format `IP:PORT`.
-
-### [`.clang-format`](.clang-format )
-
-Configuration file for the `clang-format` tool, specifying formatting rules for the codebase.
-
-### [`.gitignore`](.gitignore )
-
-Specifies files and directories to be ignored by Git, including:
-
-- [`.clang-format`](.clang-format )
-- [`peer`](peer )
-- [`seed`](seed )
-- `*.log`
-
-## Usage
-
-### Building the Project
-
-To build the project, use the following commands:
-
-```sh
-g++ -o seed seed.cpp -lpthread -lssl -lcrypto
-g++ -o peer peer.cpp -lpthread -lssl -lcrypto
+```bash
+./p 127.0.0.1 9001 seed.config
+./p 127.0.0.2 9002 seed.config
+./p 127.0.0.3 9003 seed.config
+./p 127.0.0.4 9004 seed.config
+./p 127.0.0.5 9005 seed.config
 ```
-Running the Seed Node
-To run the seed node, use the following command:
-./peer <ip> <port>
-Running the Peer Node
-./peer <ip> <port> <config_file>
-To run the peer node, use the following command:
-./peer 127.0.0.1 6000 config.txt
 
-Example
+Each peer node will:
+- Read the seed configuration and randomly register with at least ⌊(n/2)⌋+1 seeds.
+- Receive and union the peer lists from seeds.
+- Select a subset of peers to establish persistent TCP connections using weighted random selection (weight = degree + 2).
+- Generate and broadcast gossip messages (10 messages, one every 5 seconds). Each message is forwarded only once, ensuring no duplicates.
+- Periodically (every 13 seconds) ping connected peers using a temporary Ping/Pong handshake. If 3 consecutive pings fail, the peer is marked as dead, a dead–node message is sent to all seeds, and the connection is closed.
+- Log all events (registration, gossip, and liveliness events) to `peer-<LocalPort>.log` and `liveliness-<LocalPort>.txt`.
 
-./seed 127.0.0.1 5000
+## Summary
+
+- **Degree is set only during the initial registration** and remains unchanged.
+- **Peer selection uses weighted (power–law) random selection** with weight = (degree + 2).
+- **Gossip messages** are generated and reliably forwarded throughout the network, with each message forwarded only once.
+- **Liveliness checking** uses temporary Ping/Pong connections that do not affect persistent connection counts.
+- **All events are logged** appropriately to help with debugging and performance monitoring.
