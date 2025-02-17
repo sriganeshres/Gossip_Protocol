@@ -1,117 +1,178 @@
+# Project Overview
 
-
-# Gossip Protocol-based P2P Network
-
-This project implements a gossip protocol over a peer-to-peer (P2P) network. The network consists of **Seed Nodes** and **Peer Nodes**. The seed nodes act as bootstrapping servers, helping new peers join the network by providing them with a list of active peers. The peers then establish connections with a subset of these peers, exchange gossip messages, and periodically check the liveness of their neighbors.
-
-## Features & Tasks Implemented
-
-- **Seed Node Functionality:**
-  - Listens for incoming connections from peers.
-  - Registers new peers upon receiving a `Register` message.
-  - Maintains and updates a peer list (with each peer’s IP, port, and degree).
-  - Responds to peer requests by sending the current peer list.
-  - Handles updates (via `UpdateDegree` messages) and dead node reports (`DeadNode` messages).
-
-- **Peer Node Functionality:**
-  - Loads a list of seed nodes from a configuration file.
-  - Registers with at least ⌊n/2⌋+1 seed nodes (where n is the number of seeds).
-  - Retrieves and unifies peer lists from different seeds.
-  - Selects a subset of peers (using a weighted, power-law based random selection) to establish TCP connections.
-  - Runs its own server to accept incoming connections from other peers.
-  - Broadcasts gossip messages periodically (every 5 seconds) for a fixed number of messages.
-  - Periodically monitors liveness of connected peers (every 13 seconds) by sending heartbeat messages. If a peer fails to respond to three consecutive heartbeats, it is reported as dead to all seed nodes.
-
-- **Gossip Protocol:**
-  - Each gossip message is formatted as `<timestamp>:<senderIP>:<senderPort>:<messageID>`.
-  - Each peer keeps track of messages it has forwarded to avoid duplicates.
+This project implements a peer-to-peer network with seed nodes and peer nodes. The seed nodes help peers discover each other, while the peer nodes communicate and share messages using a gossip protocol.
 
 ## Project Structure
 
-- `seed.cpp`: Implements the seed node functionality.
-- `peer.cpp`: Implements the peer node functionality.
-- `seed.config`: Sample configuration file for seeds (used by peers).
+### Files
 
-## Requirements
+- [`.clang-format`](.clang-format ): Configuration file for the `clang-format` tool.
+- [`.gitignore`](.gitignore ): Specifies files and directories to be ignored by Git.
+- [`common.hpp`](common.hpp ): Contains common definitions and utilities used by both seed and peer nodes.
+- [`conf.clang`](conf.clang ): Configuration file for Clang.
+- [`config.txt`](config.txt ): Configuration file listing seed nodes.
+- [`peer`](peer ): Executable for the peer node.
+- [`peer.cpp`](peer.cpp ): Source code for the peer node.
+- [`seed`](seed ): Executable for the seed node.
+- [`seed.cpp`](seed.cpp ): Source code for the seed node.
 
-- A C++ compiler supporting C++11 (or later).
-- POSIX-compliant environment (Linux or macOS) for socket APIs.
-- `g++` is recommended.
-
-## Building the Project
-
-Compile the seed and peer nodes separately using the following commands:
-
-```bash
-g++ -std=c++11 -pthread seed.cpp -o seed
-g++ -std=c++11 -pthread peer.cpp -o peer
+```
+.
+├── common.hpp
+├── conf.clang
+├── config.txt
+├── peer.cpp
+├── README.md
+└── seed.cpp
 ```
 
-## Running the Project
+## Detailed Explanation
 
-### Step 1: Start Seed Nodes
+### [`common.hpp`](common.hpp )
 
-For testing, run **4 seed nodes**. For example, open 4 separate terminal windows and run:
+This file contains common definitions and utilities used by both seed and peer nodes.
 
-```bash
+#### Constants
+
+- [`MAX_BUFFER_SIZE`](common.hpp ): Maximum buffer size for network communication.
+- [`PING_INTERVAL`](common.hpp ): Interval for pinging peers to check their liveness.
+- [`MAX_MISSED_PINGS`](common.hpp ): Maximum number of missed pings before considering a peer dead.
+- [`MESSAGE_GENERATION_INTERVAL`](common.hpp ): Interval for generating gossip messages.
+- [`MAX_MESSAGES`](common.hpp ): Maximum number of messages to generate.
+
+#### Structs
+
+- [`Node`](common.hpp ): Represents a node in the network with [`ip`](common.hpp ) and [`port`](common.hpp ). Implements comparison operators for use in sets.
+
+#### Enums
+
+- [`MessageType`](common.hpp ): Enum for different message types used in protocol communication.
+
+#### Classes
+
+- [`Message`](common.hpp ): Handles message creation and parsing.
+- [`ThreadSafeQueue`](common.hpp ): A thread-safe queue for message processing.
+- [`PowerLawDegreeGenerator`](common.hpp ): Generates degrees based on a power-law distribution.
+- [`NetworkError`](common.hpp ): Custom exception class for network errors.
+- [`Logger`](common.hpp ): Handles logging with thread safety.
+
+### [`seed.cpp`](seed.cpp )
+
+This file contains the implementation of the seed node.
+
+#### [`SeedNode`](seed.cpp ) Class
+
+- **Private Members**:
+  - [`self`](seed.cpp ): Represents the seed node itself.
+  - [`peerList`](seed.cpp ): List of registered peers.
+  - [`peerListMutex`](seed.cpp ): Mutex for thread-safe access to [`peerList`](seed.cpp ).
+  - [`logger`](peer.cpp ): Logger instance.
+  - [`serverSocket`](peer.cpp ): Socket for accepting connections.
+  - [`running`](peer.cpp ): Flag to indicate if the node is running.
+  - [`workerThreads`](peer.cpp ): Vector of worker threads.
+  - [`clientQueue`](seed.cpp ): Queue for handling client connections.
+
+- **Private Methods**:
+  - [`initializeSocket()`](peer.cpp ): Initializes the server socket.
+  - [`acceptConnections()`](seed.cpp ): Accepts incoming connections.
+  - [`handleClient()`](seed.cpp ): Handles client requests.
+  - [`handleRegistration()`](seed.cpp ): Handles peer registration.
+  - [`handlePeerListRequest()`](seed.cpp ): Handles requests for the peer list.
+  - [`handleDeadNodeNotification()`](seed.cpp ): Handles notifications of dead nodes.
+  - [`clientHandler()`](seed.cpp ): Processes client connections from the queue.
+
+- **Public Methods**:
+  - [`SeedNode()`](seed.cpp ): Constructor to initialize the seed node.
+  - `start()`: Starts the seed node.
+  - `~SeedNode()`: Destructor to clean up resources.
+
+#### [`main`](peer.cpp ) Function
+
+- Parses command-line arguments to get IP and port.
+- Creates and starts a [`SeedNode`](seed.cpp ) instance.
+
+### [`peer.cpp`](peer.cpp )
+
+This file contains the implementation of the peer node.
+
+#### [`PeerNode`](peer.cpp ) Class
+
+- **Private Members**:
+  - [`self`](peer.cpp ): Represents the peer node itself.
+  - [`seedNodes`](peer.cpp ): List of seed nodes.
+  - [`connectedPeers`](peer.cpp ): Set of connected peers.
+  - [`messageList`](peer.cpp ): Map of messages and the peers that have seen them.
+  - [`logger`](peer.cpp ): Logger instance.
+  - [`peersMutex`](peer.cpp ): Mutex for thread-safe access to [`connectedPeers`](peer.cpp ).
+  - [`messageMutex`](peer.cpp ): Mutex for thread-safe access to [`messageList`](peer.cpp ).
+  - [`degreeGen`](peer.cpp ): Power-law degree generator.
+  - [`messageQueue`](peer.cpp ): Queue for handling messages.
+  - [`serverSocket`](peer.cpp ): Socket for accepting connections.
+  - [`running`](peer.cpp ): Flag to indicate if the node is running.
+  - [`messageCount`](peer.cpp ): Counter for generated messages.
+  - [`workerThreads`](peer.cpp ): Vector of worker threads.
+  - [`missedPings`](peer.cpp ): Map of peers and their missed pings.
+  - [`peerSockets`](peer.cpp ): Map of peers and their sockets.
+
+- **Private Methods**:
+  - [`loadConfig()`](peer.cpp ): Loads seed nodes from the configuration file.
+  - [`initializeSocket()`](peer.cpp ): Initializes the server socket.
+  - [`connectToSeeds()`](peer.cpp ): Connects to seed nodes.
+  - [`connectToSeed()`](peer.cpp ): Connects to a specific seed node.
+  - [`processPeerList()`](peer.cpp ): Processes the peer list received from a seed node.
+  - [`connectToPeer()`](peer.cpp ): Connects to a specific peer node.
+  - [`generateGossipMessage()`](peer.cpp ): Generates gossip messages.
+  - [`broadcastMessage()`](peer.cpp ): Broadcasts a message to connected peers.
+  - [`messageSender()`](peer.cpp ): Sends messages from the queue to peers.
+  - [`checkPeerLiveness()`](peer.cpp ): Checks the liveness of connected peers.
+  - [`pingPeer()`](peer.cpp ): Pings a peer to check its liveness.
+  - [`handleDeadPeer()`](peer.cpp ): Handles a dead peer.
+
+- **Public Methods**:
+  - [`PeerNode()`](peer.cpp ): Constructor to initialize the peer node.
+  - `start()`: Starts the peer node.
+  - `~PeerNode()`: Destructor to clean up resources.
+
+#### [`main`](peer.cpp ) Function
+
+- Parses command-line arguments to get IP, port, and configuration file.
+- Creates and starts a [`PeerNode`](peer.cpp ) instance.
+
+### [`config.txt`](config.txt )
+
+This file lists the seed nodes in the format `IP:PORT`.
+
+### [`.clang-format`](.clang-format )
+
+Configuration file for the `clang-format` tool, specifying formatting rules for the codebase.
+
+### [`.gitignore`](.gitignore )
+
+Specifies files and directories to be ignored by Git, including:
+
+- [`.clang-format`](.clang-format )
+- [`peer`](peer )
+- [`seed`](seed )
+- `*.log`
+
+## Usage
+
+### Building the Project
+
+To build the project, use the following commands:
+
+```sh
+g++ -o seed seed.cpp -lpthread -lssl -lcrypto
+g++ -o peer peer.cpp -lpthread -lssl -lcrypto
+```
+Running the Seed Node
+To run the seed node, use the following command:
+./peer <ip> <port>
+Running the Peer Node
+./peer <ip> <port> <config_file>
+To run the peer node, use the following command:
+./peer 127.0.0.1 6000 config.txt
+
+Example
+
 ./seed 127.0.0.1 5000
-./seed 127.0.0.1 5001
-./seed 127.0.0.1 5002
-./seed 127.0.0.1 5003
-```
-
-Each seed node will output log messages to the console and write logs to files like `seed-5000.log`.
-
-### Step 2: Create a Seed Configuration File for Peers
-
-Create a file named `seed.config` with the following content (each line represents a seed node):
-
-```
-127.0.0.1:5000
-127.0.0.1:5001
-127.0.0.1:5002
-127.0.0.1:5003
-```
-
-Place this file in the same directory as the `peer` executable (or provide its path).
-
-### Step 3: Start Peer Nodes
-
-For testing, run **7-8 peer nodes**. Open several terminal windows and execute commands like:
-
-```bash
-./peer 127.0.0.1 6000 seed.config
-./peer 127.0.0.1 6001 seed.config
-./peer 127.0.0.1 6002 seed.config
-./peer 127.0.0.1 6003 seed.config
-./peer 127.0.0.1 6004 seed.config
-./peer 127.0.0.1 6005 seed.config
-./peer 127.0.0.1 6006 seed.config
-```
-
-Each peer node will:
-- Load the seed configuration.
-- Connect to at least ⌊(n/2)⌋+1 seeds (in this example, at least 3 seeds).
-- Retrieve the peer list and then connect to a subset of the discovered peers.
-- Start its own server for incoming connections.
-- Begin broadcasting gossip messages.
-- Monitor the liveness of connected peers.
-
-Peer logs will be written to files named `peer-<port>.log` (e.g., `peer-6000.log`).
-
-## Troubleshooting
-
-- **No Seeds Loaded Error:**  
-  If you see an error like "No seeds loaded," ensure that your `seed.config` file is correctly formatted and placed in the expected directory.
-  
-- **Port Conflicts:**  
-  Ensure that the chosen ports (for both seed and peer nodes) are available and not blocked by your firewall.
-
-- **Debugging:**  
-  Both seed and peer programs log their activities. Check the console output and corresponding log files (e.g., `seed-5000.log` or `peer-6000.log`) for detailed debugging information.
-
-## Final Remarks
-
-This project demonstrates a robust implementation of a gossip protocol over a P2P network with dynamic peer discovery, registration, gossip broadcasting, and liveness monitoring. The system is designed for educational purposes and can be extended further to improve security and scalability.
-
-
