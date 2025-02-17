@@ -1,0 +1,11 @@
+[17-02-2025 23-39-32] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-39-45] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-39-58] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-40-11] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-40-24] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-40-37] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-40-50] Liveliness OK for peer 127.0.0.2:9002
+[17-02-2025 23-41-03] No response from peer 127.0.0.2:9002. Miss count: 1
+[17-02-2025 23-41-16] No response from peer 127.0.0.2:9002. Miss count: 2
+[17-02-2025 23-41-29] No response from peer 127.0.0.2:9002. Miss count: 3
+[17-02-2025 23-41-29] Reported dead peer: 127.0.0.2:9002
